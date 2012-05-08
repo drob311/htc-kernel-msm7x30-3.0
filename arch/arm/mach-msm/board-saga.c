@@ -6014,6 +6014,8 @@ static void __init saga_init_early(void)
 static void __init saga_fixup(struct machine_desc *desc, struct tag *tags,
 								char **cmdline, struct meminfo *mi)
 {
+	int mem = parse_tag_memsize((const struct tag *)tags);
+
 	engineerid = parse_tag_engineerid(tags);
 
 	mi->nr_banks = 2;
@@ -6021,9 +6023,13 @@ static void __init saga_fixup(struct machine_desc *desc, struct tag *tags,
 	mi->bank[0].size = MSM_LINUX_SIZE1;
 	mi->bank[1].start = MSM_LINUX_BASE2;
 	mi->bank[1].size = MSM_LINUX_SIZE2;
+
+	if (mem == 768)
+		mi->bank[0].size += MSM_MEM_256MB_OFFSET;
 }
 
 MACHINE_START(SAGA, "saga")
+	.boot_params = 0x04400100,
 	.fixup = saga_fixup,
 	.map_io = saga_map_io,
 	.reserve = saga_reserve,

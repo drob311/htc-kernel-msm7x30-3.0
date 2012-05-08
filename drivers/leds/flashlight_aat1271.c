@@ -1,60 +1,57 @@
-/* drivers/i2c/chips/at1271_flashlight.c
+/*
+ * arch/arm/mach-msm/msm_flashlight.c - The flashlight driver
+ * Copyright (C) 2009  HTC Corporation
  *
- * Copyright (C) 2008-2009 HTC Corporation.
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include <mach/msm_iomap.h>
-#include <linux/i2c.h>
+
+#include <asm/gpio.h>
 #include <linux/delay.h>
 #include <linux/earlysuspend.h>
 #include <linux/platform_device.h>
-#include <linux/workqueue.h>
+#include <linux/htc_flashlight.h>
+#include <mach/msm_iomap.h>
+#include <asm/io.h>
 #include <linux/leds.h>
+#include <linux/hrtimer.h>
 #include <linux/slab.h>
-#include <linux/gpio.h>
-//#include <linux/htc_flashlight.h>
-#include "flashlight_aat1271.h"
+
 
 #define FLT_DBG_LOG(fmt, ...) \
-		printk(KERN_DEBUG "[FLT]TPS " fmt, ##__VA_ARGS__)
+		printk(KERN_DEBUG "[FLT]" fmt, ##__VA_ARGS__)
 #define FLT_INFO_LOG(fmt, ...) \
-		printk(KERN_INFO "[FLT]TPS " fmt, ##__VA_ARGS__)
+		printk(KERN_INFO "[FLT]" fmt, ##__VA_ARGS__)
 #define FLT_ERR_LOG(fmt, ...) \
-		printk(KERN_ERR "[FLT][ERR]TPS " fmt, ##__VA_ARGS__)
+		printk(KERN_ERR "[FLT][ERR]" fmt, ##__VA_ARGS__)
 
 struct flashlight_struct {
 	struct led_classdev fl_lcdev;
 	struct early_suspend early_suspend_flashlight;
 	struct hrtimer timer;
-//	struct wake_lock wake_lock;
 	spinlock_t spin_lock;
 	uint32_t gpio_torch;
 	uint32_t gpio_flash;
-	uint32_t torch_set1;
-	uint32_t torch_set2;
-	uint32_t gpio_flash_adj;
 	uint32_t flash_sw_timeout_ms;
 	enum flashlight_mode_flags mode_status;
 	unsigned long spinlock_flags;
-	unsigned flash_adj_gpio_status;
-	/* inactive: 0x0
-	 * active: 0x1
-	 * force disable flashlight function: 0x2 */
-	uint8_t flash_adj_value;
 	uint8_t led_count;
-	uint32_t chip_model;
 };
-
 static struct flashlight_struct *this_fl_str;
+
+
 
 static void flashlight_hw_command(uint8_t addr, uint8_t data)
 {
@@ -84,10 +81,9 @@ static void flashlight_hw_command(uint8_t addr, uint8_t data)
 
 static void flashlight_turn_off(void)
 {
-#ifndef CONFIG_ARCH_MSM_FLASHLIGHT_DEATH_RAY
 	if (this_fl_str->mode_status == FL_MODE_OFF)
 		return;
-#endif
+
 	gpio_direction_output(this_fl_str->gpio_flash, 0);
 	gpio_direction_output(this_fl_str->gpio_torch, 0);
 	this_fl_str->mode_status = FL_MODE_OFF;
@@ -98,10 +94,10 @@ static enum hrtimer_restart flashlight_hrtimer_func(struct hrtimer *timer)
 {
 	struct flashlight_struct *fl_str = container_of(timer,
 			struct flashlight_struct, timer);
+	FLT_INFO_LOG("%s: turn off flash mode\n", __func__);
 	spin_lock_irqsave(&fl_str->spin_lock, fl_str->spinlock_flags);
 	flashlight_turn_off();
 	spin_unlock_irqrestore(&fl_str->spin_lock, fl_str->spinlock_flags);
-	FLT_INFO_LOG("%s: turn off flash mode\n", __func__);
 	return HRTIMER_NORESTART;
 }
 
@@ -110,23 +106,16 @@ int aat1271_flashlight_control(int mode)
 	int ret = 0;
 	uint32_t flash_ns = ktime_to_ns(ktime_get());
 
-#if 0 /* disable flash_adj_value check now */
-	if (this_fl_str->flash_adj_value == 2) {
-		printk(KERN_WARNING "%s: force disable function!\n", __func__);
-		return -EIO;
-	}
-#endif
 	if (this_fl_str->mode_status == mode) {
 		FLT_INFO_LOG("%s: mode is same: %d\n",
-							FLASHLIGHT_NAME, mode);
+							"aat1271_flashlight", mode);
 
 		if (!hrtimer_active(&this_fl_str->timer) &&
 			this_fl_str->mode_status == FL_MODE_OFF) {
 			FLT_INFO_LOG("flashlight hasn't been enable or" \
 				" has already reset to 0 due to timeout\n");
 			return ret;
-		}
-		else
+		} else
 			return -EINVAL;
 	}
 
@@ -141,7 +130,7 @@ int aat1271_flashlight_control(int mode)
 		flashlight_turn_off();
 	break;
 	case FL_MODE_TORCH:
-		if (this_fl_str->led_count)
+		if (this_fl_str->led_count == 2)
 			flashlight_hw_command(3, 4);
 		else
 			flashlight_hw_command(3, 3);
@@ -182,7 +171,7 @@ int aat1271_flashlight_control(int mode)
 		this_fl_str->fl_lcdev.brightness = LED_HALF + 1;
 	break;
 	case FL_MODE_TORCH_LEVEL_1:
-		if (this_fl_str->led_count)
+		if (this_fl_str->led_count == 2)
 			flashlight_hw_command(3, 4);
 		else
 			flashlight_hw_command(3, 3);
@@ -192,7 +181,7 @@ int aat1271_flashlight_control(int mode)
 		this_fl_str->fl_lcdev.brightness = LED_HALF - 2;
 	break;
 	case FL_MODE_TORCH_LEVEL_2:
-		if (this_fl_str->led_count)
+		if (this_fl_str->led_count == 2)
 			flashlight_hw_command(3, 4);
 		else
 			flashlight_hw_command(3, 3);
@@ -201,17 +190,25 @@ int aat1271_flashlight_control(int mode)
 		this_fl_str->mode_status = FL_MODE_TORCH_LEVEL_2;
 		this_fl_str->fl_lcdev.brightness = LED_HALF - 1;
 	break;
-#ifdef CONFIG_ARCH_MSM_FLASHLIGHT_DEATH_RAY
-	case FL_MODE_DEATH_RAY:
-		FLT_INFO_LOG("%s: death ray\n", __func__);
-		hrtimer_cancel(&this_fl_str->timer);
-		gpio_direction_output(this_fl_str->gpio_flash, 0);
-		udelay(40);
-		gpio_direction_output(this_fl_str->gpio_flash, 1);
-		this_fl_str->mode_status = 0;
+	case FL_MODE_CAMERA_EFFECT_PRE_FLASH:
+		flashlight_hw_command(3, 12);
+		flashlight_hw_command(0, 1);
+		flashlight_hw_command(2, 4);
+		this_fl_str->mode_status = FL_MODE_CAMERA_EFFECT_PRE_FLASH;
 		this_fl_str->fl_lcdev.brightness = 3;
 	break;
-#endif
+	case FL_MODE_CAMERA_EFFECT_FLASH:
+		flashlight_hw_command(3, 1);
+		flashlight_hw_command(0, 1);
+		flashlight_hw_command(2, 4);
+		this_fl_str->mode_status = FL_MODE_CAMERA_EFFECT_FLASH;
+		this_fl_str->fl_lcdev.brightness = 4;
+		hrtimer_start(&this_fl_str->timer,
+			ktime_set(this_fl_str->flash_sw_timeout_ms / 1000,
+				(this_fl_str->flash_sw_timeout_ms % 1000) *
+					NSEC_PER_MSEC), HRTIMER_MODE_REL);
+	break;
+
 	default:
 		FLT_ERR_LOG("%s: unknown flash_light flags: %d\n",
 							__func__, mode);
@@ -219,7 +216,7 @@ int aat1271_flashlight_control(int mode)
 	break;
 	}
 
-	FLT_INFO_LOG("%s: mode: %d, %u\n", FLASHLIGHT_NAME, mode,
+	FLT_INFO_LOG("%s: mode: %d, %u\n", "aat1271_flashlight", mode,
 		flash_ns/(1000*1000));
 
 	spin_unlock_irqrestore(&this_fl_str->spin_lock,
@@ -240,14 +237,14 @@ static void fl_lcdev_brightness_set(struct led_classdev *led_cdev,
 			mode = FL_MODE_TORCH_LEVEL_1;
 		else if (brightness == (LED_HALF - 1))
 			mode = FL_MODE_TORCH_LEVEL_2;
-		else if (brightness == 1 && fl_str->led_count)
+		else if (brightness == 1 && fl_str->led_count == 2)
 			mode = FL_MODE_TORCH_LED_A;
-		else if (brightness == 2 && fl_str->led_count)
+		else if (brightness == 2 && fl_str->led_count == 2)
 			mode = FL_MODE_TORCH_LED_B;
-#ifdef CONFIG_ARCH_MSM_FLASHLIGHT_DEATH_RAY
-		else if (brightness == 3)
-			mode = FL_MODE_DEATH_RAY;
-#endif
+		else if (brightness == 3 && fl_str->led_count == 2)
+			mode = FL_MODE_CAMERA_EFFECT_PRE_FLASH;
+		else if (brightness == 4 && fl_str->led_count == 2)
+			mode = FL_MODE_CAMERA_EFFECT_FLASH;
 		else
 			mode = FL_MODE_TORCH;
 	} else if (brightness > LED_HALF && brightness <= LED_FULL) {
@@ -260,7 +257,8 @@ static void fl_lcdev_brightness_set(struct led_classdev *led_cdev,
 		/* off and else */
 		mode = FL_MODE_OFF;
 
-	aat1271_flashlight_control(mode);
+
+		aat1271_flashlight_control(mode);
 
 	return;
 }
@@ -311,39 +309,6 @@ static int flashlight_setup_gpio(struct flashlight_platform_data *flashlight,
 		fl_str->gpio_flash = flashlight->flash;
 	}
 
-	if (flashlight->torch_set1) {
-		ret = gpio_request(flashlight->torch_set1, "fl_torch_set1");
-		if (ret < 0) {
-			FLT_ERR_LOG("%s: gpio_request(fl_torch_set1) failed\n", __func__);
-			return ret;
-		}
-		fl_str->torch_set1 = flashlight->torch_set1;
-	}
-
-	if (flashlight->torch_set2) {
-		ret = gpio_request(flashlight->torch_set2, "fl_torch_set2");
-		if (ret < 0) {
-			FLT_ERR_LOG("%s: gpio_request(fl_torch_set2) failed\n", __func__);
-			return ret;
-		}
-		fl_str->torch_set2 = flashlight->torch_set2;
-	}
-
-	if (flashlight->flash_adj) {
-		ret = gpio_request(flashlight->flash_adj, "fl_flash_adj");
-		if (ret < 0) {
-			FLT_ERR_LOG("%s: gpio_request(flash_adj) failed\n", __func__);
-			return ret;
-		}
-		fl_str->gpio_flash_adj = flashlight->flash_adj;
-		gpio_set_value(fl_str->gpio_flash_adj, 0);
-		fl_str->flash_adj_gpio_status = 0;
-		FLT_INFO_LOG("%s: enable flash_adj function\n", FLASHLIGHT_NAME);
-	}
-	if (flashlight->flash_duration_ms)
-		fl_str->flash_sw_timeout_ms = flashlight->flash_duration_ms;
-	else /* load default value */
-		fl_str->flash_sw_timeout_ms = 600;
 	return ret;
 }
 
@@ -360,71 +325,8 @@ static int flashlight_free_gpio(struct flashlight_platform_data *flashlight,
 		gpio_free(flashlight->flash);
 		fl_str->gpio_flash = 0;
 	}
-
-	if (fl_str->gpio_flash_adj) {
-		gpio_free(flashlight->flash_adj);
-		fl_str->gpio_flash_adj = 0;
-	}
-
 	return ret;
 }
-
-#ifdef FLASHLIGHT_ADJ_FUNC
-static ssize_t show_flash_adj(struct device *dev,
-				struct device_attribute *attr, char *buf)
-{
-	ssize_t length;
-	length = sprintf(buf, "%d\n", this_fl_str->flash_adj_value);
-	return length;
-}
-
-static ssize_t store_flash_adj(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t count)
-{
-	static int tmp, adj_tmp;
-	if ((buf[0] == '0' || buf[0] == '1' || buf[0] == '2')
-							&& buf[1] == '\n') {
-		spin_lock_irqsave(&this_fl_str->spin_lock,
-						this_fl_str->spinlock_flags);
-		tmp = buf[0] - 0x30;
-		if (tmp == this_fl_str->flash_adj_value) {
-			spin_unlock_irqrestore(&this_fl_str->spin_lock,
-						this_fl_str->spinlock_flags);
-			FLT_INFO_LOG("%s: status is same(%d)\n",
-				__func__, this_fl_str->flash_adj_value);
-			return count;
-		}
-		adj_tmp = this_fl_str->gpio_flash_adj;
-		switch (tmp) {
-		case 2:
-			flashlight_turn_off();
-		break;
-		case 1:
-			/*
-			if (this_fl_str->flash_adj_gpio_status) {
-				gpio_set_value(adj_tmp, 0);
-				this_fl_str->flash_adj_gpio_status = 0;
-			}
-			*/
-		break;
-		case 0:
-			/*
-			if (!this_fl_str->flash_adj_gpio_status) {
-				gpio_set_value(adj_tmp, 1);
-				this_fl_str->flash_adj_gpio_status = 1;
-			}
-			*/
-		break;
-		}
-		this_fl_str->flash_adj_value = tmp;
-		spin_unlock_irqrestore(&this_fl_str->spin_lock,
-						this_fl_str->spinlock_flags);
-	}
-	return count;
-}
-
-static DEVICE_ATTR(flash_adj, 0666, show_flash_adj, store_flash_adj);
-#endif
 
 static int flashlight_probe(struct platform_device *pdev)
 {
@@ -437,31 +339,24 @@ static int flashlight_probe(struct platform_device *pdev)
 		FLT_ERR_LOG("%s: kzalloc fail !!!\n", __func__);
 		return -ENOMEM;
 	}
-
 	err = flashlight_setup_gpio(flashlight, fl_str);
 	if (err < 0) {
 		FLT_ERR_LOG("%s: setup GPIO fail !!!\n", __func__);
 		goto fail_free_mem;
 	}
 	spin_lock_init(&fl_str->spin_lock);
-	fl_str->chip_model = flashlight->chip_model;
-	fl_str->fl_lcdev.name = pdev->name;
+	fl_str->fl_lcdev.name = FLASHLIGHT_NAME;
 	fl_str->fl_lcdev.brightness_set = fl_lcdev_brightness_set;
 	fl_str->fl_lcdev.brightness = 0;
+	if (flashlight->flash_duration_ms)
+		fl_str->flash_sw_timeout_ms = flashlight->flash_duration_ms;
+	else /* load default value */
+		fl_str->flash_sw_timeout_ms = 600;
 	err = led_classdev_register(&pdev->dev, &fl_str->fl_lcdev);
 	if (err < 0) {
 		FLT_ERR_LOG("%s: failed on led_classdev_register\n", __func__);
 		goto fail_free_gpio;
 	}
-#ifdef FLASHLIGHT_ADJ_FUNC
-	if (fl_str->gpio_flash_adj) {
-		FLT_INFO_LOG("%s: flash_adj exist, create attr file\n", __func__);
-		err = device_create_file(fl_str->fl_lcdev.dev,
-							&dev_attr_flash_adj);
-		if (err != 0)
-			FLT_ERR_LOG("%s: dev_attr_flash_adj failed\n", __func__);
-	}
-#endif
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	fl_str->early_suspend_flashlight.suspend = flashlight_early_suspend;
 	fl_str->early_suspend_flashlight.resume = flashlight_late_resume;
@@ -469,7 +364,7 @@ static int flashlight_probe(struct platform_device *pdev)
 #endif
 	hrtimer_init(&fl_str->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	fl_str->timer.function = flashlight_hrtimer_func;
-	fl_str->led_count = flashlight->led_count;
+	fl_str->led_count = (flashlight->led_count) ? flashlight->led_count : 1;
 	FLT_INFO_LOG("%s: led_count = %d\n", __func__, fl_str->led_count);
 
 	this_fl_str = fl_str;
@@ -480,7 +375,6 @@ fail_free_gpio:
 	flashlight_free_gpio(flashlight, fl_str);
 fail_free_mem:
 	kfree(fl_str);
-	FLT_ERR_LOG("make %s: The Flashlight driver is Failure\n", __func__);
 	return err;
 }
 
@@ -491,12 +385,6 @@ static int flashlight_remove(struct platform_device *pdev)
 	flashlight_turn_off();
 	hrtimer_cancel(&this_fl_str->timer);
 	unregister_early_suspend(&this_fl_str->early_suspend_flashlight);
-#ifdef FLASHLIGHT_ADJ_FUNC
-	if (this_fl_str->gpio_flash_adj) {
-		device_remove_file(this_fl_str->fl_lcdev.dev,
-							&dev_attr_flash_adj);
-	}
-#endif
 	led_classdev_unregister(&this_fl_str->fl_lcdev);
 	flashlight_free_gpio(flashlight, this_fl_str);
 
@@ -508,7 +396,7 @@ static struct platform_driver flashlight_driver = {
 	.probe		= flashlight_probe,
 	.remove		= flashlight_remove,
 	.driver		= {
-		.name		= FLASHLIGHT_NAME,
+		.name		= "FLASHLIGHT_AAT1271",
 		.owner		= THIS_MODULE,
 	},
 };
@@ -528,3 +416,4 @@ module_exit(flashlight_exit);
 
 MODULE_DESCRIPTION("flash light driver");
 MODULE_LICENSE("GPL");
+
